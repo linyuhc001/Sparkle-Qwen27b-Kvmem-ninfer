@@ -1,0 +1,58 @@
+name: Build Pmod Desktop (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/build-desktop.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Enable pnpm
+        run: corepack enable
+        shell: pwsh
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+        shell: pwsh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Build and bundle Pmod (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: desktop
+          args: --target x86_64-pc-windows-msvc
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pmod-Windows-installers
+          path: |
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.nsis/*.exe
+          if-no-files-found: warn
