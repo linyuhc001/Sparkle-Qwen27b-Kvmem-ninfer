@@ -294,8 +294,15 @@ impl Supervisor {
                 "--port", &cfg.engine_port.to_string(),
             ]);
 
-            if cfg.vision_c_p_u {
-                engine_cmd.args(["--vision-cpu", "--vision-max-merged", "256"]);
+            // Vision is OFF by default in the engine. Only enable it when the
+            // artifact actually carries a vision tower; GPU mode wants
+            // --vision (resident), CPU mode --vision-cpu (host/FP32).
+            if meta.has_vision {
+                if cfg.vision_c_p_u {
+                    engine_cmd.args(["--vision-cpu", "--vision-max-merged", "256"]);
+                } else {
+                    engine_cmd.args(["--vision"]);
+                }
             }
 
             engine_cmd.stdout(Stdio::piped());
