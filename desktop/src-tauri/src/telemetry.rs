@@ -532,8 +532,17 @@ pub fn record_from_engine_log(line: &str) -> Option<TelemetryRecord> {
         turn_number: 0,
         timestamp: now,
         time_formatted: format_time_naive(now),
-        task_type,
-        prompt_preview: "引擎请求统计（全链路）".to_string(),
+        task_type: task_type.clone(),
+        // The engine log has no prompt text, so build a meaningful, per-request
+        // summary from the real metrics instead of a static placeholder. This
+        // keeps the column informative and searchable while staying honest
+        // about not having the actual prompt.
+        prompt_preview: format!(
+            "{} · 输入 {} tok · 缓存命中 {:.1}%",
+            task_type,
+            if prompt >= 1000 { format!("{:.1}K", prompt as f64 / 1000.0) } else { prompt.to_string() },
+            cache_pct
+        ),
         ttft_ms,
         thinking_duration_sec: thinking_sec,
         thinking_tokens: 0,
