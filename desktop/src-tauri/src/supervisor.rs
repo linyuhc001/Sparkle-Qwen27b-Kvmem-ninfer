@@ -295,11 +295,14 @@ impl Supervisor {
             ]);
 
             // Vision is OFF by default in the engine. Only enable it when the
-            // artifact actually carries a vision tower; GPU mode wants
-            // --vision (resident), CPU mode --vision-cpu (host/FP32).
+            // artifact actually carries a vision tower. CPU mode -> --vision-cpu
+            // (host/FP32); GPU mode -> --vision resident, or --vision-residency
+            // overlay which keeps the tower in host RAM and borrows VRAM per image.
             if meta.has_vision {
                 if cfg.vision_c_p_u {
                     engine_cmd.args(["--vision-cpu", "--vision-max-merged", "256"]);
+                } else if cfg.vision_overlay {
+                    engine_cmd.args(["--vision", "--vision-residency", "overlay"]);
                 } else {
                     engine_cmd.args(["--vision"]);
                 }

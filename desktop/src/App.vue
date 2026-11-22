@@ -71,6 +71,7 @@ interface AppConfig {
   KVDType: string;
   AnswerPenaltyScope: string;
   VisionCPU?: boolean;
+  VisionOverlay?: boolean;
 }
 
 interface ModelMetadata {
@@ -5153,9 +5154,18 @@ onUnmounted(() => {
                         <span class="dual-radio-indicator"></span>
                         <strong class="dual-title">{{ t('GPU 显存模式', 'GPU / VRAM') }}</strong>
                       </div>
-                      <span class="dual-pill-badge badge-blue">{{ t('低延迟', 'Low latency') }}</span>
+                      <span class="dual-pill-badge" :class="appConfig.VisionOverlay ? 'badge-emerald' : 'badge-blue'">{{ appConfig.VisionOverlay ? t('折中', 'Balanced') : t('低延迟', 'Low latency') }}</span>
                     </div>
-                    <p class="dual-desc">{{ t('视觉塔驻留独立显存，识图响应最快；会占用额外显存容量。', 'Vision tower resident in GPU VRAM for the fastest image response; uses extra VRAM.') }}</p>
+                    <p class="dual-desc">{{ appConfig.VisionOverlay
+                      ? t('视觉塔放主机内存、逐张图临时借用显存；比 CPU 快，不长期占用显存。', 'Vision tower stays in host RAM and borrows VRAM per image; faster than CPU, no persistent VRAM use.')
+                      : t('视觉塔驻留独立显存，识图响应最快；会占用额外显存容量。', 'Vision tower resident in GPU VRAM for the fastest image response; uses extra VRAM.') }}</p>
+                    <div class="vision-overlay-switch" @click.stop>
+                      <span class="vos-label">{{ t('显存占用', 'VRAM usage') }}</span>
+                      <div class="vos-segments">
+                        <button class="vos-pill" :class="{ 'vos-active': !appConfig.VisionOverlay }" @click="appConfig.VisionOverlay = false">{{ t('驻留显存', 'Resident') }}</button>
+                        <button class="vos-pill" :class="{ 'vos-active': appConfig.VisionOverlay === true }" @click="appConfig.VisionOverlay = true">{{ t('逐图借用', 'Overlay') }}</button>
+                      </div>
+                    </div>
                   </div>
 
                   <div
@@ -11223,6 +11233,48 @@ onUnmounted(() => {
   color: #64748b;
   line-height: 1.4;
   margin: 0;
+}
+
+/* Vision residency sub-switch inside the GPU card */
+.vision-overlay-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+.vos-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  white-space: nowrap;
+}
+.vos-segments {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  padding: 2px;
+}
+.vos-pill {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.vos-pill:hover { color: #0f172a; }
+.vos-active {
+  background: #ffffff;
+  color: #2563eb;
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 /* Vision tower capability badge */

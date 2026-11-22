@@ -35,6 +35,8 @@ pub struct AppConfig {
     pub answer_penalty_scope: String,
     #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub vision_c_p_u: bool,
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
+    pub vision_overlay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_grounded_execution: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +103,7 @@ pub fn load_config() -> Result<AppConfig, String> {
                 k_v_d_type: "rk4v4".to_string(),
                 answer_penalty_scope: "answer".to_string(),
                 vision_c_p_u: false,
+                vision_overlay: false,
                 tool_grounded_execution: None,
                 edit_guard: None,
                 task_ledger: None,
