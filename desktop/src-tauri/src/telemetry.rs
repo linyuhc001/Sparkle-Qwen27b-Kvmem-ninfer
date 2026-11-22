@@ -406,3 +406,144 @@ fn format_time_naive(ts_ms: u64) -> String {
     let day = d + 1;
     format!("{}/{} {:02}:{:02}", month, day, h, m)
 }
+
+// ---------------------------------------------------------------------------
+// LOCAL PATCH: parse the engine's per-request summary line and turn it into a
+// telemetry record. The engine prints exactly one `req#N done | ...` line for
+// EVERY completed request (see --log-stats-interval-ms), regardless of which
+// client issued it -- Pmod's bundled DSH web, a standalone DSH client, or
+// WorkBuddy hitting /v1 directly. Parsing here therefore covers ALL callers,
+// unlike a guard-side probe which would only see traffic proxied via :1236.
+//
+// Example line:
+//   req#10 done | openai-chat | stop token | prompt 83,842 | output 11,595 |
+//   cache 83,793 (99.9%, private endpoint) | TTFT 442 ms | total 56.9s |
+//   prefill 151.2 tok/s | decode 205.5 tok/s | mixed speculation accepted ...
+// ---------------------------------------------------------------------------
+
+/// Extract a small label -> numeric-ish payload from a `req#N done` line.
+/// Returns None if the line is not a request-summary line.
+pub fn record_from_engine_log(line: &str) -> Option<TelemetryRecord> {
+    if !line.contains("req#") || !line.contains(" done ") {
+        return None;
+    }
+
+    fn num(s: &str) -> Option<f64> {
+        let cleaned: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+        if cleaned.is_empty() { return None; }
+        cleaned.parse::<f64>().ok()
+    }
+    // Fields are " | "-separated. Return the FIRST segment whose payload is
+    // actually numeric. This matters: a tag like `output limit` precedes the
+    // real `output 1,024` segment, so a naive prefix match would read "limit"
+    // and yield 0. Skipping non-numeric candidates fixes that.
+    fn field_num(s: &str, key: &str) -> Option<f64> {
+        for seg in s.split('|') {
+            let t = seg.trim();
+            if let Some(rest) = t.strip_prefix(key) {
+                if rest.starts_with(' ') || rest.starts_with(':') {
+                    if let Some(v) = num(rest.trim()) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        None
+    }
+    fn field_num_u(s: &str, key: &str) -> Option<u64> {
+        field_num(s, key).map(|v| v as u64)
+    }
+
+    let prompt = field_num_u(line, "prompt").unwrap_or(0);
+    let output = field_num_u(line, "output").unwrap_or(0);
+    // Zero-output requests (pure cache hits / failed) are not useful stats.
+    if output == 0 && prompt == 0 {
+        return None;
+    }
+
+    // TTFT may be "442 ms" or "1.1s" -- normalise to milliseconds.
+    let ttft_ms = if let Some(seg) = line.split('|').find(|s| s.trim().starts_with("TTFT ")) {
+        let raw = seg.trim().trim_start_matches("TTFT ").trim();
+        match num(raw) {
+            Some(v) if raw.contains('s') && !raw.contains("ms") => (v * 1000.0) as u64,
+            Some(v) => v as u64,
+            None => 0,
+        }
+    } else {
+        0
+    };
+    // `total` may be "56.9s" or "677 ms" -- normalise to seconds.
+    let total_s = if let Some(seg) = line.split('|').find(|s| s.trim().starts_with("total ")) {
+        let raw = seg.trim().trim_start_matches("total ").trim();
+        match num(raw) {
+            Some(v) if raw.contains("ms") => v / 1000.0,
+            Some(v) => v,
+            None => 0.0,
+        }
+    } else {
+        0.0
+    };
+    let decode_s = field_num(line, "decode").unwrap_or(0.0);
+
+    // Cache hit rate: "(99.9%, private endpoint)" right after the cache count.
+    let cache_pct = if let Some(seg) = line.split('|').find(|s| s.trim().starts_with("cache ")) {
+        if let Some(open) = seg.find('(') {
+            let tail = &seg[open + 1..];
+            let pct_str: String = tail.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            pct_str.parse::<f64>().unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // Task type heuristic from the line's own tags.
+    let task_type = if line.contains("tool calls") {
+        "工具调用".to_string()
+    } else if line.contains("output limit") {
+        "长文本生成".to_string()
+    } else if line.contains("stop token") {
+        "正常对话".to_string()
+    } else {
+        "常规推理".to_string()
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // The engine line gives total wall time + decode tok/s but no explicit
+    // thinking/output split. Derive output duration from output tokens and the
+    // reported decode speed (self-consistent), capped to the wall time; treat
+    // any remainder as "thinking" so the KPI bars still render meaningfully.
+    let output_sec = if decode_s > 0.0 && output > 0 {
+        (output as f64 / decode_s).min(if total_s > 0.0 { total_s } else { f64::INFINITY })
+    } else {
+        total_s
+    };
+    let output_sec = (output_sec * 10.0).round() / 10.0;
+    let output_sec = output_sec.max(0.1);
+    let thinking_sec = if total_s > output_sec { ((total_s - output_sec) * 10.0).round() / 10.0 } else { 0.0 };
+
+    Some(TelemetryRecord {
+        id: format!("eng_{}_{}", now, output),
+        turn_number: 0,
+        timestamp: now,
+        time_formatted: format_time_naive(now),
+        task_type,
+        prompt_preview: "引擎请求统计（全链路）".to_string(),
+        ttft_ms,
+        thinking_duration_sec: thinking_sec,
+        thinking_tokens: 0,
+        output_duration_sec: output_sec,
+        output_tokens: output,
+        generation_speed_tok_per_sec: decode_s,
+        prompt_tokens: prompt,
+        total_tokens: prompt + output,
+        cache_hit_rate_pct: cache_pct,
+        status: "success".to_string(),
+        steps: None,
+    })
+}

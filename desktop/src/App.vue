@@ -70,6 +70,7 @@ interface AppConfig {
   ReasoningEffort: string;
   KVDType: string;
   AnswerPenaltyScope: string;
+  OverlapPredecessor?: boolean;
   VisionCPU?: boolean;
   VisionOverlay?: boolean;
 }
@@ -734,9 +735,14 @@ function setSaveNotice(msg: string) {
   }, 4000);
 }
 
-// Watch DeviceKV to keep ring buffer parameters strictly balanced
+// Watch DeviceKV to keep ring buffer parameters strictly balanced.
+// LOCAL FIX: only react to a USER edit of DeviceKV. Programmatic loads from
+// local.json (fetchStatus) and hardware presets must never be re-balanced --
+// the author's tuned ring values (e.g. 36864 -> 19456/12288/3840) are NOT the
+// 0.5/0.428/0.053 ratios and were being silently overwritten on every launch.
+let suppressDeviceKVWatch = false;
 watch(() => appConfig.value?.DeviceKV, (newVal) => {
-  if (!newVal || !appConfig.value) return;
+  if (suppressDeviceKVWatch || !newVal || !appConfig.value) return;
   appConfig.value.RecentTokens = Math.round(newVal * 0.5);
   appConfig.value.SinkTokens = Math.round(newVal * 0.428);
   appConfig.value.RetrieveTokens = Math.max(1024, Math.round(newVal * 0.053));
@@ -762,6 +768,9 @@ function autoDetectHardwareTier(): string {
 function applyHardwarePreset(tier: string) {
   if (!appConfig.value) return;
   selectedHwTier.value = tier;
+  // LOCAL FIX: presets set all four ring values explicitly; don't let the
+  // DeviceKV watcher re-balance them with the generic ratio formula.
+  suppressDeviceKVWatch = true;
 
   if (tier === "entry-8g") {
     appConfig.value.DeviceKV = 16384;
@@ -809,6 +818,9 @@ function applyHardwarePreset(tier: string) {
     appConfig.value.RetrieveTokens = 512;
     setSaveNotice(t("已载入【CPU/系统内存模式】配置", "Applied CPU/Shared Memory preset"));
   }
+  // Release after Vue has flushed the reactive update so the watcher, even if
+  // queued for this tick, sees the flag raised and skips re-balancing.
+  nextTick(() => { suppressDeviceKVWatch = false; });
 }
 
 function autoTuneForCurrentHardware() {
@@ -1844,7 +1856,11 @@ async function fetchStatus() {
     if (cfg && !cfg.GpuArch) {
       cfg.GpuArch = "sm120a";
     }
+    // LOCAL FIX: raise the guard around the programmatic load so the DeviceKV
+    // watcher doesn't mistake it for a user edit and clobber tuned ring values.
+    suppressDeviceKVWatch = true;
     appConfig.value = cfg;
+    nextTick(() => { suppressDeviceKVWatch = false; });
     if (cfg?.ModelPath) {
       refreshModelMetadata(cfg.ModelPath);
     }
@@ -2595,6 +2611,12 @@ onMounted(() => {
       const state = await invoke<ServiceState>("get_service_state");
       serviceState.value = state;
       if (currentTab.value === "overview" && state.status === "Running") {
+        // LOCAL PATCH: engine-log telemetry is persisted to telemetry.jsonl by
+        // the supervisor (covers DSH web / standalone DSH / WorkBuddy direct).
+        // Refresh from backend so new req#N records appear without a page reload.
+        if (!isShowingDemoData.value) {
+          await loadTelemetryFromBackend();
+        }
         await syncTelemetryFromGuard();
       }
     } catch (e) {}

@@ -9,6 +9,20 @@ where
     Ok(opt.unwrap_or(false))
 }
 
+// LOCAL PATCH: OverlapPredecessor defaults to TRUE (author's v1.1.0 setting).
+// A missing/null field must not silently switch back to v1.0.0 selection.
+fn deserialize_null_as_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<bool>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or(true))
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn default_gpu_arch() -> String {
     "sm120a".to_string()
 }
@@ -33,6 +47,8 @@ pub struct AppConfig {
     pub reasoning_effort: String,
     pub k_v_d_type: String,
     pub answer_penalty_scope: String,
+    #[serde(default = "default_true", deserialize_with = "deserialize_null_as_true")]
+    pub overlap_predecessor: bool,
     #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub vision_c_p_u: bool,
     #[serde(default, deserialize_with = "deserialize_null_as_false")]
@@ -102,6 +118,7 @@ pub fn load_config() -> Result<AppConfig, String> {
                 reasoning_effort: "xhigh".to_string(),
                 k_v_d_type: "rk4v4".to_string(),
                 answer_penalty_scope: "answer".to_string(),
+                overlap_predecessor: true,
                 vision_c_p_u: false,
                 vision_overlay: false,
                 tool_grounded_execution: None,

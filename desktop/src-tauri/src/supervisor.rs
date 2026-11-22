@@ -1,6 +1,9 @@
 use crate::config_manager::{get_repo_root, load_config};
 use crate::job_object::ProcessJobGroup;
+// LOCAL PATCH: engine-log -> telemetry (all callers, incl. WorkBuddy direct :1234)
+use crate::telemetry::{append_telemetry_record, record_from_engine_log};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
@@ -72,6 +75,28 @@ impl Supervisor {
         };
         if let Some(app) = &self.app_handle {
             let _ = app.emit("log-message", entry);
+        }
+    }
+
+    // LOCAL PATCH: turn an engine `req#N done` log line into a persisted
+    // telemetry record. The engine emits one such line per completed request
+    // for EVERY client (Pmod DSH / standalone DSH / WorkBuddy direct :1234),
+    // so this gives full-caller coverage without touching the guard.
+    fn capture_engine_telemetry(&self, line: &str, seen: &Arc<Mutex<HashSet<String>>>) {
+        let rec = match record_from_engine_log(line) {
+            Some(r) => r,
+            None => return,
+        };
+        // De-dup by the engine's own req#N counter so a line that appears on
+        // both stdout and stderr, or is re-emitted, is counted only once.
+        let key = line.split(' ').find(|s| s.starts_with("req#"))
+            .unwrap_or(rec.id.as_str()).to_string();
+        let mut set = match seen.lock() { Ok(s) => s, Err(_) => return };
+        if !set.insert(key) {
+            return;
+        }
+        if let Err(e) = append_telemetry_record(&rec) {
+            eprintln!("telemetry append failed: {}", e);
         }
     }
 
@@ -248,6 +273,10 @@ impl Supervisor {
             engine_cmd.env("NINFER_HOST_PAGEABLE", "1");
             engine_cmd.env("NINFER_KV_LEASE_RING", "1");
             engine_cmd.env("NINFER_KVMEM_HARVEST_TEXT", "1");
+            // LOCAL PATCH: v1.1.0 complete-query-gated predecessor fill. Author's
+            // start.ps1 pins this to 1 by default; expose it via config so it
+            // matches the reference config (OverlapPredecessor: true).
+            engine_cmd.env("NINFER_KVMEM_OVERLAP_PREDECESSOR", if cfg.overlap_predecessor { "1" } else { "0" });
             engine_cmd.env("NINFER_KVMEM_INDEX_DECODE", "1");
             engine_cmd.env("NINFER_KVMEM_CACHE_QUERY", "1");
             engine_cmd.env("NINFER_C2_ROLLING_ANCHOR", "1");
@@ -318,20 +347,26 @@ impl Supervisor {
             let _ = self.job.assign_raw_handle(child.as_raw_handle());
 
             // Spawn logging tasks
+            // LOCAL PATCH: shared de-dup set for req#N telemetry across both streams.
+            let seen_req: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
             if let Some(stdout) = child.stdout.take() {
                 let this = Arc::clone(&self);
+                let seen = Arc::clone(&seen_req);
                 tokio::spawn(async move {
                     let reader = BufReader::new(stdout);
                     for line in reader.lines().flatten() {
+                        this.capture_engine_telemetry(&line, &seen);
                         this.emit_log("engine", &line);
                     }
                 });
             }
             if let Some(stderr) = child.stderr.take() {
                 let this = Arc::clone(&self);
+                let seen = Arc::clone(&seen_req);
                 tokio::spawn(async move {
                     let reader = BufReader::new(stderr);
                     for line in reader.lines().flatten() {
+                        this.capture_engine_telemetry(&line, &seen);
                         this.emit_log("engine:err", &line);
                     }
                 });
