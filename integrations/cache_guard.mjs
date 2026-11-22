@@ -224,7 +224,45 @@ function guard(messages) {
   return { msgs: out, healed, verdict: healed ? 'healed' : 'clean', detail: firstDiff >= 0 ? `firstDiff=#${firstDiff}` : '' };
 }
 
+// LOCAL PATCH (probe): the desktop "Probe Benchmark" fetches this proxy from the
+// Tauri WebView (cross-origin), so it needs CORS preflight + headers. Without this the
+// browser aborts with a bare "Failed to fetch" before the request ever reaches us.
+const CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
+  'access-control-allow-headers': 'content-type, authorization',
+  'access-control-max-age': '600',
+};
+
+// LOCAL PATCH (probe): probe posts a hard-coded model name "local-model" that the engine
+// rejects (404 model_not_found). lazily resolve the real id from upstream /v1/models.
+let cachedModelId = '';
+function fetchModelId(cb) {
+  let done = false;
+  const finish = (id) => { if (!done) { done = true; cb(id); } };
+  try {
+    const r = http.request({ hostname: UP.hostname, port: UP.port, path: '/v1/models', method: 'GET' }, (uRes) => {
+      let buf = '';
+      uRes.on('data', (c) => { buf += c; });
+      uRes.on('end', () => {
+        let id = '';
+        try { id = JSON.parse(buf)?.data?.[0]?.id || ''; } catch { /* ignore */ }
+        finish(id);
+      });
+    });
+    r.on('error', () => finish(''));
+    r.setTimeout(3000, () => { r.destroy(); finish(''); });
+    r.end();
+  } catch { finish(''); }
+}
+
 const server = http.createServer((req, res) => {
+  // CORS preflight: answer locally, never forward OPTIONS to the engine.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
   // Propagate a downstream stop to the engine, including while queued or
   // waiting for headers. A normal completed response must not be cancelled.
   let upstreamRequest;
@@ -266,28 +304,57 @@ const server = http.createServer((req, res) => {
         }
       } catch (e) { note = 'guard parse error: ' + e.message; }
     }
-    const headers = { ...req.headers };
-    delete headers.host;
-    headers['content-length'] = String(outBody.length);
-    const up = http.request({ hostname: UP.hostname, port: UP.port, method: req.method, path: req.url, headers }, (uRes) => {
-      upstreamResponse = uRes;
-      if (cancelled || res.destroyed) { uRes.destroy(); return; }
-      // After a partial stream, fail the connection instead of appending a
-      // JSON error to an already-open SSE/JSON response or leaving it hanging.
-      uRes.once('aborted', () => { if (!res.destroyed) res.destroy(); });
-      uRes.once('error', () => { if (!res.destroyed) res.destroy(); });
-      res.writeHead(uRes.statusCode || 502, uRes.headers);
-      uRes.pipe(res);
-    });
-    upstreamRequest = up;
-    up.on('error', (e) => {
+    // LOCAL PATCH (probe): rewrite the hard-coded name "local-model" to the live engine id.
+    let isProbeModel = false;
+    if (isChat && body.length) {
+      try {
+        const parsed = JSON.parse(body.toString('utf8'));
+        if (parsed && parsed.model === 'local-model') isProbeModel = true;
+      } catch { /* not json, leave as-is */ }
+    }
+    const forward = (payload) => {
       if (cancelled || res.destroyed) return;
-      log('upstream error: ' + e.message);
-      if (res.headersSent) { res.destroy(); return; }
-      res.writeHead(502, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'guard: upstream ' + e.message } }));
-    });
-    up.end(outBody);
+      const headers = { ...req.headers };
+      delete headers.host;
+      headers['content-length'] = String(payload.length);
+      const up = http.request({ hostname: UP.hostname, port: UP.port, method: req.method, path: req.url, headers }, (uRes) => {
+        upstreamResponse = uRes;
+        if (cancelled || res.destroyed) { uRes.destroy(); return; }
+        // After a partial stream, fail the connection instead of appending a
+        // JSON error to an already-open SSE/JSON response or leaving it hanging.
+        uRes.once('aborted', () => { if (!res.destroyed) res.destroy(); });
+        uRes.once('error', () => { if (!res.destroyed) res.destroy(); });
+        res.writeHead(uRes.statusCode || 502, { ...uRes.headers, ...CORS_HEADERS });
+        uRes.pipe(res);
+      });
+      upstreamRequest = up;
+      up.on('error', (e) => {
+        if (cancelled || res.destroyed) return;
+        log('upstream error: ' + e.message);
+        if (res.headersSent) { res.destroy(); return; }
+        res.writeHead(502, { 'content-type': 'application/json', ...CORS_HEADERS });
+        res.end(JSON.stringify({ error: { message: 'guard: upstream ' + e.message } }));
+      });
+      up.end(payload);
+    };
+
+    if (isProbeModel) {
+      const sendWithRealId = (id) => {
+        if (id) {
+          try {
+            const parsed = JSON.parse(outBody.toString('utf8'));
+            parsed.model = id;
+            outBody = Buffer.from(JSON.stringify(parsed), 'utf8');
+            log(`probe model rewritten: local-model -> ${id}`);
+          } catch { /* forward unchanged */ }
+        }
+        forward(outBody);
+      };
+      if (cachedModelId) sendWithRealId(cachedModelId);
+      else fetchModelId((id) => { cachedModelId = id || ''; sendWithRealId(cachedModelId); });
+      return;
+    }
+    forward(outBody);
   });
 });
 server.listen(PORT, '127.0.0.1', () => log(`cache_guard listening on 127.0.0.1:${PORT} -> ${UP.href} (heal=${HEAL} strict=${STRICT} ratio=${STRICT ? 'n/a' : RATIO})`));

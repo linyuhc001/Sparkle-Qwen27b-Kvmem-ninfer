@@ -24,6 +24,9 @@ const SUPPORTED_PATCH_VERSIONS = {
   'dsh-typert-loader': '0.1.5-rc.3',
   'dsh-compaction-basic': '0.1.5-rc.3',
   'dsh-compaction-tool-result-pruner': '0.1.5-rc.3',
+  // WebView2 embedds DSH as a third-party iframe; SameSite=Strict drops the
+  // session cookie there, so the patched index.js uses SameSite=None; Secure.
+  'dsh-client-connection': '0.1.5-rc.3',
 };
 for (const [pkg, expectedVersion] of Object.entries(SUPPORTED_PATCH_VERSIONS)) {
   const folder = path.join(dsh, 'node_modules/@deepseek-ai', pkg);
