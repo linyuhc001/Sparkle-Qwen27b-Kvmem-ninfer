@@ -87,6 +87,7 @@ interface ModelMetadata {
   hidden_size: number;
   model_id: string;
   source_origin: string;
+  has_vision?: boolean;
 }
 
 interface ServiceState {
@@ -5111,6 +5112,76 @@ onUnmounted(() => {
                       {{ t('单次会话支持的最大逻辑全域上下文容量（默认 256K，覆盖长篇著作与完整工程代码库）。由 RoPE 位置编码与 KVMem 逻辑页池共同保证。', 'Max session context limit (default 256K, covers long texts and full codebases), guaranteed by RoPE & KVMem paging pool.') }}
                     </p>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Card Section B.5: Vision Tower Runtime Mode -->
+            <div class="studio-card">
+              <div class="studio-card-head">
+                <div class="head-left">
+                  <div class="head-icon-box bg-purple-subtle text-purple">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
+                      <circle cx="12" cy="12" r="3"></circle>
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 class="studio-card-title">{{ t('视觉塔运行模式 (Vision Tower)', 'Vision Tower Runtime Mode') }}</h3>
+                    <span class="studio-card-sub">{{ t('设置视觉编码器的运行位置：显存优先低延迟，或内存优先省显存；需模型制品内打包视觉塔方可生效', 'Choose where the vision encoder runs: VRAM for low latency, or RAM to save VRAM. Requires a vision tower embedded in the model artifact.') }}</span>
+                  </div>
+                </div>
+                <span
+                  class="vision-support-tag"
+                  :class="modelMetadata?.has_vision ? 'vision-yes' : 'vision-no'"
+                >
+                  {{ modelMetadata?.has_vision
+                      ? t('● 当前模型支持视觉塔', '● Vision supported')
+                      : t('○ 当前模型无视觉塔', '○ No vision tower') }}
+                </span>
+              </div>
+
+              <div class="studio-card-body">
+                <div class="kvd-dual-selector">
+                  <div
+                    class="kvd-dual-card"
+                    :class="{ active: !appConfig.VisionCPU }"
+                    @click="appConfig.VisionCPU = false"
+                  >
+                    <div class="dual-top">
+                      <div class="dual-title-group">
+                        <span class="dual-radio-indicator"></span>
+                        <strong class="dual-title">{{ t('GPU 显存模式', 'GPU / VRAM') }}</strong>
+                      </div>
+                      <span class="dual-pill-badge badge-blue">{{ t('低延迟', 'Low latency') }}</span>
+                    </div>
+                    <p class="dual-desc">{{ t('视觉塔驻留独立显存，识图响应最快；会占用额外显存容量。', 'Vision tower resident in GPU VRAM for the fastest image response; uses extra VRAM.') }}</p>
+                  </div>
+
+                  <div
+                    class="kvd-dual-card"
+                    :class="{ active: appConfig.VisionCPU === true }"
+                    @click="appConfig.VisionCPU = true"
+                  >
+                    <div class="dual-top">
+                      <div class="dual-title-group">
+                        <span class="dual-radio-indicator"></span>
+                        <strong class="dual-title">{{ t('CPU 内存模式', 'CPU / RAM') }}</strong>
+                      </div>
+                      <span class="dual-pill-badge badge-emerald">{{ t('省显存', 'Save VRAM') }}</span>
+                    </div>
+                    <p class="dual-desc">{{ t('视觉塔以 FP32 在 CPU 内存运行，不占显存；单图较慢（约 9.6 秒），merged 上限 256。', 'Vision tower runs in CPU RAM as FP32 with no device VRAM; slower (~9.6s/image), merged capped at 256.') }}</p>
+                  </div>
+                </div>
+
+                <div class="vision-hint-strip" :class="modelMetadata?.has_vision ? 'hint-ok' : 'hint-warn'">
+                  <span class="vision-hint-icon">{{ modelMetadata?.has_vision ? '💡' : '⚠️' }}</span>
+                  <span class="vision-hint-text" v-if="modelMetadata?.has_vision">
+                    {{ t('已检测到当前制品内嵌视觉塔。切换模式后请保存配置并重启引擎生效。', 'Vision tower detected in the current artifact. Save & restart the engine to apply changes.') }}
+                  </span>
+                  <span class="vision-hint-text" v-else>
+                    {{ t('当前模型制品未打包视觉塔，切换模式不会生效。请在“更换模型”中选择带 vision 的 .ninfer 制品。', 'No vision tower in the current artifact; switching modes has no effect. Pick a .ninfer artifact with vision via "Change Model".') }}
+                  </span>
                 </div>
               </div>
             </div>
@@ -11152,6 +11223,59 @@ onUnmounted(() => {
   color: #64748b;
   line-height: 1.4;
   margin: 0;
+}
+
+/* Vision tower capability badge */
+.vision-support-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 11px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+}
+.vision-support-tag.vision-yes {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+.vision-support-tag.vision-no {
+  background: #f8fafc;
+  color: #64748b;
+  border-color: #e2e8f0;
+}
+
+.vision-hint-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.vision-hint-strip.hint-ok {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+}
+.vision-hint-strip.hint-warn {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+.vision-hint-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1.3;
+}
+.vision-hint-text {
+  color: #475569;
+}
+.hint-ok .vision-hint-text {
+  color: #1e40af;
+}
+.hint-warn .vision-hint-text {
+  color: #92400e;
 }
 
 /* Studio Input Wrappers & Pills */

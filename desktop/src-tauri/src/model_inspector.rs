@@ -18,6 +18,8 @@ pub struct ModelMetadata {
     pub hidden_size: u32,
     pub model_id: String,
     pub source_origin: String, // "binary_header" | "filename_fallback"
+    #[serde(default)]
+    pub has_vision: bool, // true when the .ninfer container carries a `vision` component
 }
 
 impl Default for ModelMetadata {
@@ -36,6 +38,7 @@ impl Default for ModelMetadata {
             hidden_size: 0,
             model_id: String::new(),
             source_origin: "none".to_string(),
+            has_vision: false,
         }
     }
 }
@@ -171,9 +174,21 @@ fn parse_ninfer_header(file: &mut File, magic_buf: &[u8; 16], filename: &str) ->
         return None;
     };
 
-    let text_cfg = v.get("components").and_then(|c| c.get("text")).and_then(|t| t.get("config"));
+    let components_obj = v.get("components");
+    let text_cfg = components_obj.and_then(|c| c.get("text")).and_then(|t| t.get("config"));
     let metadata_obj = v.get("metadata");
     let provenance_obj = v.get("provenance");
+    // A model supports vision only if the container actually embeds a `vision`
+    // component (with a non-empty resource/config block). Do not rely on the
+    // filename, since some text-only artifacts contain "vision" in their name.
+    let has_vision = components_obj
+        .and_then(|c| c.get("vision"))
+        .map(|vc| {
+            vc.get("resources").is_some_and(|r| {
+                r.as_object().is_some_and(|m| !m.is_empty())
+            }) || vc.get("config").is_some()
+        })
+        .unwrap_or(false);
 
     let raw_arch = text_cfg
         .and_then(|c| c.get("architectures"))
@@ -228,6 +243,7 @@ fn parse_ninfer_header(file: &mut File, magic_buf: &[u8; 16], filename: &str) ->
         hidden_size,
         model_id,
         source_origin: "binary_header".to_string(),
+        has_vision,
     })
 }
 
@@ -336,6 +352,7 @@ fn parse_gguf_header(file: &mut File, _magic_buf: &[u8; 16], filename: &str) -> 
         hidden_size: 0,
         model_id: if !model_name.is_empty() { model_name } else { filename.trim_end_matches(".gguf").to_string() },
         source_origin: "binary_header".to_string(),
+        has_vision: false,
     })
 }
 
